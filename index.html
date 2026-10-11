@@ -90,6 +90,10 @@
   .rates button:active { transform: scale(.94); }
   .row { display: flex; gap: 10px; margin-top: 10px; }
   .row button { flex: 1; height: 58px; font-weight: 700; font-size: 17px; }
+  .row.big button { height: 76px; font-size: 20px; }
+  .verdict { text-align: center; font-weight: 700; margin-bottom: 4px; }
+  .verdict.k { color: #8ff0b8; } .verdict.s { color: #ff9c94; }
+  .norate { width: 100%; margin-top: 10px; height: 52px; font-weight: 600; background: var(--panel2); }
   .skip { background: #2c1b1a; color: #ff9c94; border: 1px solid #5a2a27 !important; }
   .keep { background: #17301f; color: #8ff0b8; border: 1px solid #2b6040 !important; }
   .sub { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; font-size: 13px; color: var(--muted); gap: 8px; }
@@ -105,7 +109,13 @@
   .sheet .actions { display: flex; flex-direction: column; gap: 8px; }
   .sheet .actions button { text-align: left; background: var(--panel2); }
   .dist { display: grid; grid-template-columns: repeat(10, 1fr); gap: 4px; align-items: end; height: 90px; margin: 8px 0 2px; }
-  .dist div { background: var(--accent); border-radius: 4px 4px 0 0; min-height: 2px; }
+  .dist > div { display: flex; flex-direction: column-reverse; height: 100%; justify-content: flex-start; }
+  .dist i { display: block; min-height: 0; }
+  .dist i.k { background: var(--accent); border-radius: 0 0 0 0; }
+  .dist i.s { background: #6b4a47; }
+  .dist > div > i:last-child { border-radius: 4px 4px 0 0; }
+  .legend { display: flex; gap: 14px; justify-content: center; font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .legend b { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
   .distl { display: grid; grid-template-columns: repeat(10, 1fr); gap: 4px; text-align: center; font-size: 12px; color: var(--muted); }
   .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
   .stats div { background: var(--panel2); border-radius: 12px; padding: 10px; text-align: center; }
@@ -149,7 +159,7 @@ const S = {
   playlists: [], pickSrc: null, pickDst: null, dstMode: 'new',
   tracks: [], byUri: {}, order: [], dec: {}, hist: [],
   cur: null, playing: false, noDevice: false, devices: [],
-  busy: false, menu: false, toast: null
+  busy: false, menu: false, toast: null, phase: 'decide'
 };
 
 class AuthError extends Error {}
@@ -332,19 +342,28 @@ async function jump(ms) {
 }
 
 /* ---------- decisions ---------- */
-async function decide(keep, rating) {
-  if (S.busy || !S.cur) return;
+// Step 1: keep or skip. The song keeps playing while you rate it.
+async function decide(keep) {
+  if (S.busy || !S.cur || S.phase !== 'decide') return;
   const u = S.cur; S.busy = true; render();
   try {
     if (keep) await api(`/playlists/${sess().dst.id}/items`, { method: 'POST', body: { uris: [u] } });
-    S.dec[u] = { k: keep ? 1 : 0, r: rating ?? null, t: Date.now() };
+    S.dec[u] = { k: keep ? 1 : 0, r: null, t: Date.now() };
     S.hist.push(u); saveDec();
-    S.cur = nextUri();
-    if (keep) toast(rating ? `Kept · ${rating}/10` : 'Kept', 900);
+    S.phase = 'rate';
   } catch (e) { toast("Couldn't add to playlist: " + e.message); }
   S.busy = false; render();
-  if (S.cur && S.view === 'sift') play(S.cur);
-  if (!S.cur) { S.view = 'done'; render(); }
+}
+// Step 2: optional rating (null = no rating), then on to the next song.
+function rate(r) {
+  if (S.busy || !S.cur || S.phase !== 'rate') return;
+  const d = S.dec[S.cur];
+  if (d) { d.r = r; saveDec(); }
+  if (r != null) toast(`${d && d.k ? 'Kept' : 'Skipped'} · ${r}/10`, 900);
+  S.phase = 'decide';
+  S.cur = nextUri();
+  if (!S.cur) { S.view = 'done'; render(); return; }
+  render(); play(S.cur);
 }
 async function undo() {
   if (S.busy || !S.hist.length) return;
@@ -355,7 +374,9 @@ async function undo() {
     catch (e) { toast('Undone here, but remove it from the playlist yourself: ' + e.message, 4000); }
   }
   delete S.dec[u]; saveDec();
-  S.cur = u; S.view = 'sift'; S.busy = false; render(); play(u);
+  const replay = !(S.phase === 'rate' && S.cur === u); // still on this song: keep it playing
+  S.cur = u; S.phase = 'decide'; S.view = 'sift'; S.busy = false; render();
+  if (replay) play(u);
 }
 
 /* ---------- extras ---------- */
@@ -438,7 +459,7 @@ async function start() {
   goSift(true);
 }
 async function goSift(autoplay) {
-  S.cur = nextUri(); S.playing = false; S.menu = false;
+  S.cur = nextUri(); S.playing = false; S.menu = false; S.phase = 'decide';
   S.view = S.cur ? 'sift' : 'done'; render();
   await loadDevices();
   if (autoplay && S.cur && !S.noDevice) play(S.cur);
@@ -536,9 +557,12 @@ const views = {
         </div>
       </main>
       <section class="decide ${S.busy ? 'busy' : ''}">
-        <div class="label">Keep it with a rating — or just tap Keep</div>
-        <div class="rates">${[1,2,3,4,5,6,7,8,9,10].map(r => `<button data-a="rate" data-r="${r}" style="color:${ratingColor(r)}">${r}</button>`).join('')}</div>
-        <div class="row"><button class="skip" data-a="skip">Skip ✕</button><button class="keep" data-a="keep">Keep ✓</button></div>
+        ${S.phase === 'rate' ? `
+          <div class="verdict ${S.dec[S.cur] && S.dec[S.cur].k ? 'k' : 's'}">${S.dec[S.cur] && S.dec[S.cur].k ? 'Kept ✓' : 'Skipped ✕'}</div>
+          <div class="label">Rate it? (optional)</div>
+          <div class="rates">${[1,2,3,4,5,6,7,8,9,10].map(r => `<button data-a="rate" data-r="${r}" style="color:${ratingColor(r)}">${r}</button>`).join('')}</div>
+          <button class="norate" data-a="norate">No rating →</button>`
+        : `<div class="row big"><button class="skip" data-a="skip">Skip ✕</button><button class="keep" data-a="keep">Keep ✓</button></div>`}
         <div class="sub">
           <button class="link" data-a="undo" ${S.hist.length ? '' : 'disabled'}>↶ Undo</button>
           ${devs ? `<select id="dev" aria-label="Play on">${devs}</select>` : `<button class="link" data-a="retryDev">Find devices</button>`}
@@ -555,10 +579,11 @@ const views = {
 
 function menuHtml() {
   const s = sess(); const c = counts();
-  const rated = Object.values(S.dec).filter(d => d.k && d.r != null);
+  const rated = Object.values(S.dec).filter(d => d.r != null);
   const avg = rated.length ? (rated.reduce((a, d) => a + d.r, 0) / rated.length).toFixed(1) : '–';
-  const dist = Array(10).fill(0); rated.forEach(d => dist[d.r - 1]++);
-  const max = Math.max(1, ...dist);
+  const dk = Array(10).fill(0), ds = Array(10).fill(0);
+  rated.forEach(d => (d.k ? dk : ds)[d.r - 1]++);
+  const max = Math.max(1, ...dk.map((n, i) => n + ds[i]));
   return `<div class="scrim" data-a="closeMenu"></div><div class="sheet ${S.busy ? 'busy' : ''}">
     <h2>${esc(s.src.name)} → ${esc(s.dst.name)}</h2>
     <div class="stats">
@@ -566,8 +591,9 @@ function menuHtml() {
       <div><b>${fmt(c.kept)}</b><span>kept${c.done ? ' (' + Math.round(c.kept / c.done * 100) + '%)' : ''}</span></div>
       <div><b>${avg}</b><span>avg rating</span></div>
     </div>
-    ${rated.length ? `<div class="dist">${dist.map(n => `<div style="height:${n / max * 100}%" title="${n}"></div>`).join('')}</div>
-      <div class="distl">${dist.map((n, i) => `<span>${i + 1}</span>`).join('')}</div>` : ''}
+    ${rated.length ? `<div class="dist">${dk.map((n, i) => `<div title="${n} kept, ${ds[i]} skipped"><i class="k" style="height:${n / max * 100}%"></i><i class="s" style="height:${ds[i] / max * 100}%"></i></div>`).join('')}</div>
+      <div class="distl">${dk.map((n, i) => `<span>${i + 1}</span>`).join('')}</div>
+      <div class="legend"><span><b style="background:var(--accent)"></b>kept</span><span><b style="background:#6b4a47"></b>skipped</span></div>` : ''}
     <h2>Playlist from your ratings</h2>
     <p>Makes a new playlist with every kept song rated at least…</p>
     <div class="inline"><select id="minR">${[10,9,8,7,6,5].map(r => `<option value="${r}" ${r === 8 ? 'selected' : ''}>${r} or higher</option>`).join('')}</select>
@@ -618,9 +644,10 @@ const actions = {
   toggle: () => togglePlay(),
   back: () => jump(-15000),
   fwd: () => jump(30000),
-  rate: b => decide(true, Number(b.dataset.r)),
-  keep: () => decide(true, null),
-  skip: () => decide(false, null),
+  rate: b => rate(Number(b.dataset.r)),
+  norate: () => rate(null),
+  keep: () => decide(true),
+  skip: () => decide(false),
   undo: () => { S.menu = false; undo(); },
   retryDev: async () => { await loadDevices(); if (!S.noDevice) play(S.cur); },
   menu: () => { S.menu = true; render(); },
@@ -649,9 +676,10 @@ document.addEventListener('change', e => {
 });
 document.addEventListener('keydown', e => {
   if (S.view !== 'sift' || S.menu || /INPUT|SELECT|TEXTAREA/.test(e.target.tagName)) return;
-  if (/^[0-9]$/.test(e.key)) decide(true, e.key === '0' ? 10 : Number(e.key));
-  else if (e.key === 'k' || e.key === 'Enter') decide(true, null);
-  else if (e.key === 's' || e.key === 'x' || e.key === 'ArrowRight') decide(false, null);
+  if (S.phase === 'rate' && /^[0-9]$/.test(e.key)) rate(e.key === '0' ? 10 : Number(e.key));
+  else if (S.phase === 'rate' && (e.key === 'Enter' || e.key === 'n' || e.key === 'ArrowRight')) rate(null);
+  else if (S.phase === 'decide' && e.key === 'k') decide(true);
+  else if (S.phase === 'decide' && (e.key === 's' || e.key === 'x')) decide(false);
   else if (e.key === 'u' || (e.key === 'z' && (e.metaKey || e.ctrlKey))) undo();
   else if (e.key === ' ') { e.preventDefault(); togglePlay(); }
 });
