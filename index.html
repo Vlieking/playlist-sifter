@@ -324,13 +324,14 @@ function playErr(e) {
 }
 const deviceTrouble = e => e.status === 404 || e.status === 502 || e.status === 503 || /device/i.test(e.message || '');
 // Is Spotify playing song u? (Compare names too: Spotify sometimes swaps in a relinked copy with another URI.)
-const isOurs = (st, u) => !!(st && st.item && (st.item.uri === u || (S.byUri[u] && st.item.name === S.byUri[u].n)));
+const isOurs = (st, u) => !!(st && (st.item
+  ? (st.item.uri === u || (S.byUri[u] && st.item.name === S.byUri[u].n))
+  : started === u));  // Spotify sometimes omits the track details; then trust what we started
 // How we start a song. Since late Sep 2026 a bare "play this track" command is unreliable
 // (it plays for a moment or not at all), so the default is to play the song inside its original
 // playlist. A quiet background check retries once the other way if it didn't take.
 const PLAY_MODES = {
-  context: u => ({ context_uri: 'spotify:playlist:' + sess().src.id, offset: { uri: u } }),
-  list: u => ({ uris: [u, ...S.order.filter(x => x !== u && !S.dec[x] && S.byUri[x]).slice(0, 30)] })
+  context: u => ({ context_uri: 'spotify:playlist:' + sess().src.id, offset: { uri: u } })
 };
 let playSeq = 0;      // bumps on every play/pause tap, so stale background checks give up
 let started = null;   // the song we last started in Spotify
@@ -355,22 +356,15 @@ async function play(u, again) {
     S.playing = false; playErr(e); render();
   }
 }
-// A few seconds later, check (without touching the UI) that Spotify really plays the song.
+// A few seconds later, check (without touching the UI) that something is playing.
+// Only if Spotify is clearly idle do we send the same start command once more. Never a different kind.
 async function watchdog(u, seq) {
-  await sleep(3500);
+  await sleep(4000);
   if (seq !== playSeq || S.cur !== u) return;
-  const st = await api('/me/player').catch(() => null);
-  if (seq !== playSeq || S.cur !== u) return;
-  if (isOurs(st, u) && st.is_playing) return;
-  try { await sendPlay(u, 'list'); } catch (e) { return; }
-  await sleep(3500);
-  if (seq !== playSeq || S.cur !== u) return;
-  const st2 = await api('/me/player').catch(() => null);
-  if (seq !== playSeq || S.cur !== u) return;
-  if (!(isOurs(st2, u) && st2.is_playing)) {
-    S.playing = false; render();
-    toast("Spotify didn't start the song. Open the Spotify app, tap play once, come back and tap ▶.", 4500);
-  }
+  const st = await api('/me/player?market=from_token').catch(() => 'unknown');
+  if (st === 'unknown' || seq !== playSeq || S.cur !== u) return;   // can't tell: leave it alone
+  if (st && st.is_playing) return;
+  try { await sendPlay(u, 'context'); } catch (e) {}
 }
 async function togglePlay() {
   const seq = ++playSeq;
@@ -387,7 +381,7 @@ async function togglePlay() {
 }
 async function jump(ms) {
   try {
-    const st = await api('/me/player');
+    const st = await api('/me/player?market=from_token');
     if (!isOurs(st, S.cur)) return play(S.cur);
     const pos = Math.max(0, Math.min(st.progress_ms + ms, st.item.duration_ms - 3000));
     await api('/me/player/seek?position_ms=' + pos, { method: 'PUT' });
