@@ -323,9 +323,41 @@ function playErr(e) {
   else toast(e.message);
 }
 const deviceTrouble = e => e.status === 404 || e.status === 502 || e.status === 503 || /device/i.test(e.message || '');
+// Is Spotify playing song u? (Compare names too: Spotify sometimes swaps in a relinked copy with another URI.)
+const isOurs = (st, u) => !!(st && st.item && (st.item.uri === u || (S.byUri[u] && st.item.name === S.byUri[u].n)));
+// Two ways to start a song. Since late Sep 2026 Spotify sometimes accepts a bare "play this track"
+// command and then just stops, so we check it actually started and fall back to the other way.
+const PLAY_MODES = {
+  // the song followed by the next undecided songs in your shuffle, so Spotify continues in the same order
+  list: u => ({ uris: [u, ...S.order.filter(x => x !== u && !S.dec[x] && S.byUri[x]).slice(0, 30)] }),
+  // the song inside the original playlist
+  context: u => ({ context_uri: 'spotify:playlist:' + sess().src.id, offset: { uri: u } })
+};
+let playSeq = 0;
+async function startPlayback(u, seq) {
+  const pref = store.get('playMode', 'list');
+  const modes = [pref, ...Object.keys(PLAY_MODES).filter(m => m !== pref)];
+  for (const m of modes) {
+    await api('/me/player/play' + devq(), { method: 'PUT', body: PLAY_MODES[m](u) });
+    for (const wait of [900, 1600]) {
+      await sleep(wait);
+      if (seq !== playSeq) return true; // you already moved on to another song
+      const st = await api('/me/player').catch(() => null);
+      if (isOurs(st, u) && st.is_playing) { store.set('playMode', m); return true; }
+    }
+  }
+  return false;
+}
 async function play(u, again) {
   if (!u) return;
-  try { await api('/me/player/play' + devq(), { method: 'PUT', body: { uris: [u] } }); S.playing = true; S.noDevice = false; }
+  const seq = ++playSeq;
+  try {
+    S.noDevice = false;
+    const ok = await startPlayback(u, seq);
+    if (seq !== playSeq) return;
+    S.playing = ok;
+    if (!ok) toast("Spotify didn't start the song. Open the Spotify app, tap play once, come back and tap ▶.", 4500);
+  }
   catch (e) {
     if (!again && deviceTrouble(e)) {
       // The phone's Spotify connection often gets a fresh session after a network switch: look it up again and retry.
@@ -339,7 +371,7 @@ async function play(u, again) {
 async function togglePlay() {
   try {
     const st = await api('/me/player');
-    const same = st && st.item && st.item.uri === S.cur;
+    const same = isOurs(st, S.cur);
     if (same && st.is_playing) { await api('/me/player/pause', { method: 'PUT' }); S.playing = false; }
     else if (same) { await api('/me/player/play', { method: 'PUT' }); S.playing = true; }
     else await play(S.cur);
@@ -349,7 +381,7 @@ async function togglePlay() {
 async function jump(ms) {
   try {
     const st = await api('/me/player');
-    if (!st || !st.item || st.item.uri !== S.cur) return play(S.cur);
+    if (!isOurs(st, S.cur)) return play(S.cur);
     const pos = Math.max(0, Math.min(st.progress_ms + ms, st.item.duration_ms - 3000));
     await api('/me/player/seek?position_ms=' + pos, { method: 'PUT' });
   } catch (e) { playErr(e); }
