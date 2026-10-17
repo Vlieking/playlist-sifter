@@ -73,6 +73,7 @@
   .bar { height: 6px; background: var(--panel2); border-radius: 3px; overflow: hidden; }
   .bar i { display: block; height: 100%; background: var(--accent); border-radius: 3px; transition: width .3s; }
   .ptxt { font-size: 13px; color: var(--muted); margin-top: 6px; }
+  .vchip { height: 42px; padding: 0 12px; font-size: 13px; color: var(--muted); background: var(--panel); white-space: nowrap; }
   .icon { width: 42px; height: 42px; padding: 0; font-size: 20px; background: var(--panel); }
   .card { display: flex; flex-direction: column; align-items: center; text-align: center; padding: 6px 0 2px; }
   .art { width: min(74vw, 36vh, 340px); aspect-ratio: 1; border-radius: 14px; object-fit: cover; background: var(--panel2); box-shadow: 0 12px 40px rgba(0,0,0,.45); }
@@ -134,6 +135,9 @@
 <div id="app"></div>
 <input type="file" id="restoreFile" accept="application/json,.json" hidden>
 <script>
+try { if (JSON.parse(localStorage.getItem('ps_version')) === 'new') location.replace('new.html' + location.search); } catch (e) {}
+</script>
+<script>
 "use strict";
 /* ---------- basics ---------- */
 const API = 'https://api.spotify.com/v1';
@@ -142,7 +146,8 @@ const SCOPES = [
   'playlist-modify-private', 'playlist-modify-public',
   'user-read-playback-state', 'user-modify-playback-state'
 ].join(' ');
-const REDIRECT = location.origin + location.pathname.replace(/index\.html$/, '');
+const REDIRECT = location.origin + location.pathname.replace(/[^/]*$/, '');  // the site folder: registered at Spotify
+const VERSION = 'classic', OTHER_PAGE = 'new.html';
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -199,7 +204,7 @@ async function tokenRequest(params) {
 async function handleCallback() {
   const q = new URLSearchParams(location.search);
   if (!q.has('code') && !q.has('error')) return;
-  history.replaceState(null, '', REDIRECT);
+  history.replaceState(null, '', location.pathname);
   if (q.get('error')) throw new AuthError('Spotify login was cancelled or refused (' + q.get('error') + ').');
   if (q.get('state') !== store.get('state')) throw new AuthError('Login state did not match. Please try again.');
   await tokenRequest({ grant_type: 'authorization_code', code: q.get('code'), redirect_uri: REDIRECT, code_verifier: store.get('verifier') });
@@ -323,66 +328,33 @@ function playErr(e) {
   else toast(e.message);
 }
 const deviceTrouble = e => e.status === 404 || e.status === 502 || e.status === 503 || /device/i.test(e.message || '');
-// Is Spotify playing song u? (Compare names too: Spotify sometimes swaps in a relinked copy with another URI.)
-const isOurs = (st, u) => !!(st && (st.item
-  ? (st.item.uri === u || (S.byUri[u] && st.item.name === S.byUri[u].n))
-  : started === u));  // Spotify sometimes omits the track details; then trust what we started
-// How we start a song. Since late Sep 2026 a bare "play this track" command is unreliable
-// (it plays for a moment or not at all), so the default is to play the song inside its original
-// playlist. A quiet background check retries once the other way if it didn't take.
-const PLAY_MODES = {
-  context: u => ({ context_uri: 'spotify:playlist:' + sess().src.id, offset: { uri: u } })
-};
-let playSeq = 0;      // bumps on every play/pause tap, so stale background checks give up
-let started = null;   // the song we last started in Spotify
-async function sendPlay(u, mode) {
-  await api('/me/player/play' + devq(), { method: 'PUT', body: PLAY_MODES[mode](u) });
-}
 async function play(u, again) {
   if (!u) return;
-  const seq = ++playSeq;
-  S.playing = true; S.noDevice = false; render();          // respond to the tap right away
-  try {
-    await sendPlay(u, 'context');
-    started = u;
-    watchdog(u, seq);
-  } catch (e) {
-    if (seq !== playSeq) return;
+  try { await api('/me/player/play' + devq(), { method: 'PUT', body: { uris: [u] } }); S.playing = true; S.noDevice = false; }
+  catch (e) {
     if (!again && deviceTrouble(e)) {
       // The phone's Spotify connection often gets a fresh session after a network switch: look it up again and retry.
       store.del('device'); await loadDevices();
       if (!S.noDevice) return play(u, true);
     }
-    S.playing = false; playErr(e); render();
+    playErr(e);
   }
-}
-// A few seconds later, check (without touching the UI) that something is playing.
-// Only if Spotify is clearly idle do we send the same start command once more. Never a different kind.
-async function watchdog(u, seq) {
-  await sleep(4000);
-  if (seq !== playSeq || S.cur !== u) return;
-  const st = await api('/me/player?market=from_token').catch(() => 'unknown');
-  if (st === 'unknown' || seq !== playSeq || S.cur !== u) return;   // can't tell: leave it alone
-  if (st && st.is_playing) return;
-  try { await sendPlay(u, 'context'); } catch (e) {}
+  render();
 }
 async function togglePlay() {
-  const seq = ++playSeq;
-  if (S.playing) {
-    S.playing = false; render();                             // instant feedback
-    try { await api('/me/player/pause', { method: 'PUT' }); }
-    catch (e) { if (seq === playSeq && !/restriction|already/i.test(e.message)) playErr(e); }
-    return;
-  }
-  if (started !== S.cur) return play(S.cur);
-  S.playing = true; render();
-  try { await api('/me/player/play' + devq(), { method: 'PUT' }); }   // resume where it was
-  catch (e) { if (seq === playSeq) play(S.cur); }
+  try {
+    const st = await api('/me/player');
+    const same = st && st.item && st.item.uri === S.cur;
+    if (same && st.is_playing) { await api('/me/player/pause', { method: 'PUT' }); S.playing = false; }
+    else if (same) { await api('/me/player/play', { method: 'PUT' }); S.playing = true; }
+    else await play(S.cur);
+  } catch (e) { playErr(e); }
+  render();
 }
 async function jump(ms) {
   try {
-    const st = await api('/me/player?market=from_token');
-    if (!isOurs(st, S.cur)) return play(S.cur);
+    const st = await api('/me/player');
+    if (!st || !st.item || st.item.uri !== S.cur) return play(S.cur);
     const pos = Math.max(0, Math.min(st.progress_ms + ms, st.item.duration_ms - 3000));
     await api('/me/player/seek?position_ms=' + pos, { method: 'PUT' });
   } catch (e) { playErr(e); }
@@ -545,7 +517,7 @@ const views = {
   loading: () => `<div class="center"><div class="spinner"></div><p>${esc(S.loadMsg)}</p></div>`,
   error: () => `<h1>Something went wrong</h1><div class="err">${esc(S.err)}</div>
     <button class="primary" data-a="reload">Try again</button>
-    <p style="margin-top:14px"><button class="link" data-a="logout">Log out</button> <button class="link" data-a="editId">Change Client ID</button></p>`,
+    <p style="margin-top:14px"><button class="link" data-a="logout">Log out</button> <button class="link" data-a="editId">Change Client ID</button> <button class="link" data-a="switchVer">Switch to new version</button></p>`,
   config: () => `<h1>Playlist Sifter</h1>
     <p>One-time setup. In your Spotify developer app, set this exact Redirect URI:</p>
     <div class="box mono" id="redir">${esc(REDIRECT)}</div>
@@ -589,6 +561,7 @@ const views = {
       <header class="top">
         <div class="prog"><div class="bar"><i style="width:${pct.toFixed(1)}%"></i></div>
           <div class="ptxt">${fmt(c.done)} of ${fmt(c.total)} · ${fmt(c.kept)} kept</div></div>
+        <button class="vchip" data-a="switchVer" title="Switch to the new version">Classic ⇄</button>
         <button class="icon" data-a="menu" aria-label="Menu">☰</button>
       </header>
       ${S.noDevice ? `<div class="warn"><span>Lost the connection to Spotify (this can happen after switching networks or when Spotify has been idle). Open the Spotify app, tap play for a second, come back and tap Retry.</span><button data-a="retryDev">Retry</button></div>` : ''}
@@ -620,7 +593,8 @@ const views = {
     const c = counts();
     return `<div class="center"><h1>All done 🎉</h1><p>You went through ${fmt(c.total)} songs and kept ${fmt(c.kept)}.</p>
       <button class="primary" data-a="menu" style="max-width:320px">Stats & extras</button>
-      <button class="link" data-a="undo" ${S.hist.length ? '' : 'disabled'}>↶ Undo last</button></div>`;
+      <button class="link" data-a="undo" ${S.hist.length ? '' : 'disabled'}>↶ Undo last</button>
+      <button class="link" data-a="switchVer">Switch to new version</button></div>`;
   }
 };
 
@@ -655,6 +629,7 @@ function menuHtml() {
     <h2>Session</h2>
     <div class="actions">
       <button data-a="refresh">↻ Re-load songs from Spotify (picks up new additions)</button>
+      <button data-a="switchVer">⇄ Switch to the new app version</button>
       <button data-a="change">⇄ Switch playlists</button>
       <button data-a="reset">⟲ Start this playlist over</button>
       <button data-a="logout">Log out</button>
@@ -679,6 +654,7 @@ const actions = {
   saveId: () => { const v = $('#cid').value.trim(); if (!/^[0-9a-f]{32}$/i.test(v)) return toast('That doesn\'t look like a Client ID (32 letters/digits).'); store.set('clientId', v); S.err = null; S.view = 'login'; render(); },
   copyRedir: async () => { try { await navigator.clipboard.writeText(REDIRECT); toast('Copied'); } catch (e) { toast('Select and copy it manually'); } },
   editId: () => { S.view = 'config'; render(); },
+  switchVer: () => { store.set('version', VERSION === 'classic' ? 'new' : 'classic'); location.href = OTHER_PAGE; },
   login: () => login(),
   reload: () => location.reload(),
   logout: () => { if (!confirm('Log out? Your progress stays saved on this device.')) return; store.del('token'); S.menu = false; S.view = 'login'; S.err = null; render(); },
