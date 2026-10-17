@@ -560,8 +560,8 @@ const views = {
     return `
       <header class="top">
         <div class="prog"><div class="bar"><i style="width:${pct.toFixed(1)}%"></i></div>
-          <div class="ptxt">${fmt(c.done)} of ${fmt(c.total)} · ${fmt(c.kept)} kept</div></div>
-        <button class="vchip" data-a="switchVer" title="Switch to the new version">Classic ⇄</button>
+          <div class="ptxt">${fmt(c.done)} of ${fmt(c.total)} · ${fmt(c.kept)} kept · <span style="color:var(--accent)">Classic version</span></div></div>
+        <button class="vchip" data-a="switchVer" title="You are using the classic version">Switch to New</button>
         <button class="icon" data-a="menu" aria-label="Menu">☰</button>
       </header>
       ${S.noDevice ? `<div class="warn"><span>Lost the connection to Spotify (this can happen after switching networks or when Spotify has been idle). Open the Spotify app, tap play for a second, come back and tap Retry.</span><button data-a="retryDev">Retry</button></div>` : ''}
